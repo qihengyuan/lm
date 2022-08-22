@@ -326,8 +326,8 @@ class Trainer:
         self.attempts_per_step = attempts_per_step
         self.jacobian_max_num_rows = jacobian_max_num_rows
         self.experimental_use_pfor = experimental_use_pfor
-        #self.batch_end_loss2 = list()
-        #self.batch_end_acc2 = list()
+        self.batch_end_loss = list()
+        self.batch_end_acc = list()
 
         # Define and select linear system equation solver.
         def qr(matrix, rhs):
@@ -503,7 +503,6 @@ class Trainer:
         # keep track of the learning rate that gives the smallest loss
         coeff = 0
 
-        
         # The first round
         stop_training = False
         attempt = 0
@@ -905,7 +904,8 @@ class Trainer:
                 targets,
                 self._init_gauss_newton_underdetermined,
                 self._compute_gauss_newton_underdetermined)
-
+        self.batch_end_loss.append(loss)
+        
         return loss, outputs, attempts, stop_training
 
     def fit(self, dataset, epochs=1, metrics=None):
@@ -1040,8 +1040,8 @@ class ModelWrapper(tf.keras.Sequential):
                 "attempts": attempts,
                 "loss": loss}
         logs.update({m.name: m.result() for m in self.metrics})
-        #self.trainer.batch_end_loss2.append(logs['loss'])
-        #self.trainer.batch_end_acc2.append(logs['accuracy'])
+        #self.trainer.batch_end_loss.append(logs['loss'])
+        self.trainer.batch_end_acc.append(logs['accuracy'])
 
         # BUG: In tensorflow v2.2.0 and v2.3.0 setting model.stop_training=True
         # does not stop training immediately, but only at the end of the epoch.
