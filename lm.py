@@ -463,10 +463,41 @@ class Trainer:
         J, residuals, outputs = self._compute_jacobian(inputs, targets)
         JJ = tf.linalg.matmul(J, J, transpose_b=True)
         rhs = residuals
+        #rhs = tf.linalg.matmul(J, residuals, transpose_a=True)
+        
         return J, JJ, rhs, outputs
+    
+    def dct2(self, block):
+        return tf.signal.dct(tf.transpose(tf.signal.dct(tf.transpose(block), norm='ortho')), norm='ortho')
+
+    def idct2(self, block):
+        return tf.signal.idct(tf.transpose(tf.signal.idct(tf.transpose(block), norm='ortho')), norm='ortho')
+
+    def blockdiag(self, blocks):
+        tfl = tf.linalg
+        linop_blocks = [tfl.LinearOperatorFullMatrix(block) for block in blocks]
+        linop_block_diagonal = tfl.LinearOperatorBlockDiag(linop_blocks)
+        return linop_block_diagonal.to_dense()
+
+    def inv_dct(self, M, size = 1):
+        tfl = tf.linalg
+        A = dct2(M)
+        dim = M.shape[0]
+        ls = []
+        for i in range(0, dim-size, size):
+            ls.append(tfl.inv(A[i:(i+size), i:(i+size)]))
+        last_ind = dim % size
+        if last_ind == 0:
+            last_ind = size
+        last_ind = dim - last_ind
+        ls.append(tfl.inv(A[last_ind:,last_ind:]))
+        A_inv = blockdiag(ls)
+        M_inv = idct2(A_inv)
+        return M_inv
 
     def _compute_gauss_newton_overdetermined(self, J, JJ, rhs):
-        updates = self.solve_function(JJ, rhs)
+        #updates = self.solve_function(JJ, rhs)
+        updates = tf.linalg.matmul(dct_inv(JJ, 342), rhs)
         return updates
 
     def _compute_gauss_newton_underdetermined(self, J, JJ, rhs):
@@ -768,7 +799,7 @@ class Trainer:
             else:
                 break
         
-        # The final round
+        # The fifth round
         stop_training = False
         attempt = 0
         damping_factor = self.damping_algorithm.init_step(
@@ -815,6 +846,72 @@ class Trainer:
                         # Accept the new model variables and backup them.
                         if new_loss < loss_bk:
                             coeff = 0.005
+                            attempt_bk = attempt
+                            damp_bk = damping_factor
+                            loss_bk = new_loss
+                        self.restore_variables()
+                        break
+
+                    # Restore the old variables and try a new damping_factor.
+                    self.restore_variables()
+
+                damping_factor = self.damping_algorithm.increase(
+                    damping_factor, loss)
+
+                stop_training = self.damping_algorithm.stop_training(
+                    damping_factor, loss)
+                if stop_training:
+                    break
+            else:
+                break
+        
+        # The final round
+        stop_training = False
+        attempt = 0
+        damping_factor = self.damping_algorithm.init_step(
+            self.damping_factor, loss)
+        
+        attempts = tf.constant(self.attempts_per_step, dtype=tf.int32)
+
+        while tf.constant(True, dtype=tf.bool):
+            update_computed = False
+            try:
+                # Apply the damping to the gauss-newton hessian approximation.
+                JJ_damped = self.damping_algorithm.apply(damping_factor, JJ)
+
+                # Compute the updates:
+                # overdetermined: updates = (J'*J + damping)^-1*J'*residuals
+                # underdetermined: updates = J'*(J*J' + damping)^-1*residuals
+                updates = 0.001 * compute_gauss_newton(J, JJ_damped, rhs)
+            except Exception as e:
+                del e
+            else:
+                if tf.reduce_all(tf.math.is_finite(updates)):
+                    update_computed = True
+                    # Split and Reshape the updates
+                    updates = tf.split(tf.squeeze(updates, axis=-1), self._splits)
+                    updates = [tf.reshape(update, shape)
+                               for update, shape in zip(updates, self._shapes)]
+
+                    # Apply the updates to the model trainable_variables.
+                    outputs = self.model(inputs, training=False)
+                    loss = self.loss(targets, outputs)
+                    self.backup_variables()
+                    self.optimizer.apply_gradients(
+                        zip(updates, self.model.trainable_variables))
+
+            if attempt < attempts:
+                attempt += 1
+
+                if update_computed:
+                    # Compute the new loss value.
+                    outputs = self.model(inputs, training=False)
+                    new_loss = self.loss(targets, outputs)
+                        
+                    if new_loss < loss:
+                        # Accept the new model variables and backup them.
+                        if new_loss < loss_bk:
+                            coeff = 0.001
                             attempt_bk = attempt
                             damp_bk = damping_factor
                             loss_bk = new_loss
